@@ -1,6 +1,8 @@
 import sys
 import random
+import json
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QIcon, QDesktopServices
@@ -9,7 +11,9 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView, QToolButton,
     QLineEdit, QAbstractItemView
 )
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+
+# YouTube invisible player (QtWebEngine)
+from PySide6.QtWebEngineWidgets import QWebEngineView
 
 
 # ---------------------------------------------
@@ -20,29 +24,18 @@ def base_dir() -> Path:
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
+
 def asset_path(name: str) -> Path:
     return base_dir() / "assets" / name
 
-def canciones_dir() -> Path:
-    return base_dir() / "canciones"
+
+def tracks_json_path() -> Path:
+    return base_dir() / "tracks.json"
 
 
 # ---------------------------------------------
-# Parsing de nombre de archivo -> (artista, canción)
-# Espera formato: "Artista - Canción.ext"
+# Reproductor
 # ---------------------------------------------
-def parse_nombre_archivo(filename: str):
-    name = Path(filename).stem
-    if " - " in name:
-        artista, cancion = name.split(" - ", 1)
-        return artista.strip(), cancion.strip()
-    return "(Desconocido)", name.strip()
-
-
-# Archivos de audio soportados
-EXTS = {".mp3", ".wav", ".m4a", ".aac", ".wma", ".ogg"}
-
-
 class MusicPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -54,7 +47,7 @@ class MusicPlayer(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_png)))
 
         # Datos y estado
-        self.tracks = []           # dicts: {path, artista, cancion}
+        self.tracks = []           # dicts: {artista, cancion, url}
         self.current_index = -1
         self.random_mode = False
         self.random_queue = []     # cola de índices para modo random
@@ -63,16 +56,43 @@ class MusicPlayer(QMainWindow):
         # UI
         self._build_ui()
 
-        # Player
-        self.audio = QAudioOutput()
-        self.player = QMediaPlayer()
-        self.player.setAudioOutput(self.audio)
+        # Player invisible (YouTube IFrame)
+        self.web = QWebEngineView(self)
+        self.web.setFixedSize(1, 1)
+        self.web.hide()
 
-        # Ir al siguiente al terminar
-        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
+        html = """
+<!doctype html><html><body style="margin:0;background:black;">
+<div id="player"></div>
+<script>
+var tag=document.createElement('script');
+tag.src="https://www.youtube.com/iframe_api";
+document.body.appendChild(tag);
 
-        # Cargar canciones
-        self._ensure_canciones_dir()
+var player=null;
+var pending=null;
+
+function onYouTubeIframeAPIReady(){
+  player = new YT.Player('player', {
+    height:'1', width:'1',
+    videoId:'',
+    playerVars:{autoplay:0,controls:0,fs:0,rel:0,iv_load_policy:3,playsinline:1},
+    events:{onReady: function(){ if(pending){ playId(pending); pending=null; } }}
+  });
+}
+
+function playId(id){
+  if(!player){ pending=id; return; }
+  player.loadVideoById(id);
+  player.playVideo();
+}
+function pauseVid(){ if(player) player.pauseVideo(); }
+function stopVid(){ if(player) player.stopVideo(); }
+</script></body></html>
+"""
+        self.web.setHtml(html, QUrl("https://www.youtube.com"))
+
+        # Cargar canciones desde tracks.json
         self._scan_and_load()
 
     # -------------------------
@@ -101,8 +121,6 @@ class MusicPlayer(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        # Si quieres selección de una sola fila:
-        # self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
         header = self.table.horizontalHeader()
@@ -133,10 +151,10 @@ class MusicPlayer(QMainWindow):
         self.btn_random.toggled.connect(self._on_toggle_random)
         controls.addWidget(self.btn_random)
 
-        self.btn_open_folder = QToolButton()
-        self.btn_open_folder.setText("📂 Abrir carpeta canciones")
-        self.btn_open_folder.clicked.connect(self._on_open_folder)
-        controls.addWidget(self.btn_open_folder)
+        self.btn_open_file = QToolButton()
+        self.btn_open_file.setText("📝 Abrir tracks.json")
+        self.btn_open_file.clicked.connect(self._on_open_tracks_json)
+        controls.addWidget(self.btn_open_file)
 
         controls.addStretch(1)
         root.addLayout(controls)
@@ -151,31 +169,54 @@ class MusicPlayer(QMainWindow):
         self.setMinimumSize(720, 420)
 
     # -------------------------
-    # Canciones
+    # Cargar tracks desde JSON
     # -------------------------
-    def _ensure_canciones_dir(self):
-        d = canciones_dir()
-        d.mkdir(parents=True, exist_ok=True)
-
     def _scan_and_load(self):
         self.tracks.clear()
-        d = canciones_dir()
-        for entry in sorted(d.iterdir()):
-            if entry.is_file() and entry.suffix.lower() in EXTS:
-                artista, cancion = parse_nombre_archivo(entry.name)
-                self.tracks.append({
-                    "path": entry.resolve(),
-                    "artista": artista,
-                    "cancion": cancion
-                })
-        # Orden base: por artista, luego canción
-        self.tracks.sort(key=lambda t: (t["artista"].lower(), t["cancion"].lower()))
+        p = tracks_json_path()
+        if not p.exists():
+            # Plantilla para que el usuario entienda el formato
+            p.write_text(
+                json.dumps(
+                    [
+                        {
+                            "artista": "Daft Punk",
+                            "cancion": "One More Time",
+                            "url": "https://www.youtube.com/watch?v=FGBhQbmPwH8",
+                        }
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                raise ValueError("tracks.json debe contener una lista JSON.")
+        except Exception as e:
+            self.statusBar().showMessage(f"Error leyendo tracks.json: {e}", 8000)
+            data = []
+
+        for t in data:
+            if not isinstance(t, dict):
+                continue
+            self.tracks.append(
+                {
+                    "artista": (t.get("artista") or "(Desconocido)").strip(),
+                    "cancion": (t.get("cancion") or "(Sin título)").strip(),
+                    "url": (t.get("url") or "").strip(),
+                }
+            )
+
+        self.tracks.sort(key=lambda x: (x["artista"].lower(), x["cancion"].lower()))
         self._refresh_view()
 
         if not self.tracks:
             self.statusBar().showMessage(
-                "No se encontraron canciones. Pon tus archivos en 'canciones' junto al .exe/.py",
-                8000
+                "No hay tracks. Edita 'tracks.json' y pon enlaces de YouTube.",
+                8000,
             )
 
     # -------------------------
@@ -227,6 +268,28 @@ class MusicPlayer(QMainWindow):
         self._select_row_for_index(self.current_index)
 
     # -------------------------
+    # YouTube helpers
+    # -------------------------
+    def _youtube_id(self, url: str):
+        u = urlparse(url)
+        host = (u.netloc or "").lower()
+
+        if "youtu.be" in host:
+            return u.path.strip("/") or None
+
+        if "youtube.com" in host:
+            if u.path == "/watch":
+                return parse_qs(u.query).get("v", [None])[0]
+            if u.path.startswith("/shorts/"):
+                parts = u.path.split("/")
+                return parts[2] if len(parts) > 2 else None
+            if u.path.startswith("/embed/"):
+                parts = u.path.split("/")
+                return parts[2] if len(parts) > 2 else None
+
+        return None
+
+    # -------------------------
     # Reproducción
     # -------------------------
     def _on_double_click(self, row, _col):
@@ -238,29 +301,30 @@ class MusicPlayer(QMainWindow):
             self._play_index(idx)
 
     def _on_play_pause(self):
-        state = self.player.playbackState()
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self.player.pause()
+        # Si no hay track seleccionado, elige uno como antes (respeta filtro + orden + random)
+        if self.current_index < 0 and self.tracks:
+            if self.random_mode:
+                pool = self._visible_pool_indices() or list(range(len(self.tracks)))
+                self._prepare_random_queue(pool=pool, exclude_index=None)
+                nxt = self._get_next_random_index()
+                if nxt is None:
+                    nxt = pool[0]
+                self._play_index(nxt)
+            else:
+                pool = self._visible_pool_indices() or list(range(len(self.tracks)))
+                self._play_index(pool[0])
+            return
+
+        # Toggle simple basado en el texto del botón
+        if self.btn_play.text().startswith("⏸"):
+            self.web.page().runJavaScript("pauseVid()")
             self.btn_play.setText("▶ Play")
         else:
-            if self.current_index < 0 and self.tracks:
-                if self.random_mode:
-                    pool = self._visible_pool_indices() or list(range(len(self.tracks)))
-                    self._prepare_random_queue(pool=pool, exclude_index=None)
-                    nxt = self._get_next_random_index()
-                    if nxt is None:
-                        nxt = pool[0]
-                    self._play_index(nxt)
-                else:
-                    # Empieza por el primero visible (filtro + orden actual)
-                    pool = self._visible_pool_indices() or list(range(len(self.tracks)))
-                    self._play_index(pool[0])
-            else:
-                self.player.play()
-                self.btn_play.setText("⏸ Pause")
+            if 0 <= self.current_index < len(self.tracks):
+                self._play_index(self.current_index)
 
     def _on_stop(self):
-        self.player.stop()
+        self.web.page().runJavaScript("stopVid()")
         self.btn_play.setText("▶ Play")
 
     def _on_next(self):
@@ -273,7 +337,6 @@ class MusicPlayer(QMainWindow):
             nxt = self._get_next_random_index()
             if nxt is None:
                 pool = self._visible_pool_indices() or list(range(len(self.tracks)))
-                # fallback: siguiente secuencial dentro del pool visible
                 try:
                     pos = pool.index(self.current_index)
                     nxt = pool[(pos + 1) % len(pool)]
@@ -309,17 +372,21 @@ class MusicPlayer(QMainWindow):
             return None
         return self.random_queue.pop(0)
 
-    def _on_open_folder(self):
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(canciones_dir())))
-
     def _play_index(self, index: int):
         if not (0 <= index < len(self.tracks)):
             return
         self.current_index = index
         track = self.tracks[index]
-        url = QUrl.fromLocalFile(str(track["path"]))
-        self.player.setSource(url)
-        self.player.play()
+
+        vid = self._youtube_id(track["url"])
+        if not vid:
+            self.statusBar().showMessage("URL inválida de YouTube para esta pista.", 5000)
+            return
+
+        # Escapar comillas simples en el improbable caso de que entren en el ID (no debería)
+        vid = vid.replace("'", "\\'")
+        self.web.page().runJavaScript(f"playId('{vid}')")
+
         self.btn_play.setText("⏸ Pause")
         self._update_title()
         self._select_row_for_index(index)
@@ -343,9 +410,18 @@ class MusicPlayer(QMainWindow):
         else:
             self.setWindowTitle("Reproductor — Gabriel Golker")
 
-    def _on_media_status_changed(self, status):
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._on_next()
+    # -------------------------
+    # Utilidades
+    # -------------------------
+    def _on_open_tracks_json(self):
+        # Abre el archivo para editarlo rápido (se crea si no existe)
+        p = tracks_json_path()
+        if not p.exists():
+            p.write_text("[]", encoding="utf-8")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+
+    # Para refrescar la lista si editas el JSON mientras la app está abierta:
+    # podrías añadir un botón "🔄 Recargar" y llamar self._scan_and_load()
 
 
 def main():
@@ -361,6 +437,7 @@ def main():
     w = MusicPlayer()
     w.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
