@@ -33,9 +33,6 @@ def tracks_json_path() -> Path:
     return base_dir() / "tracks.json"
 
 
-# ---------------------------------------------
-# Reproductor
-# ---------------------------------------------
 class MusicPlayer(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -47,7 +44,7 @@ class MusicPlayer(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_png)))
 
         # Datos y estado
-        self.tracks = []           # dicts: {artista, cancion, url}
+        self.tracks = []           # dicts: {artista, cancion, genero, url}
         self.current_index = -1
         self.random_mode = False
         self.random_queue = []     # cola de índices para modo random
@@ -92,7 +89,7 @@ function stopVid(){ if(player) player.stopVideo(); }
 """
         self.web.setHtml(html, QUrl("https://www.youtube.com"))
 
-        # Cargar canciones desde tracks.json
+        # Cargar tracks desde tracks.json
         self._scan_and_load()
 
     # -------------------------
@@ -109,15 +106,15 @@ function stopVid(){ if(player) player.stopVideo(); }
         # Buscador
         search_row = QHBoxLayout()
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Buscar por artista o canción…")
+        self.search_input.setPlaceholderText("Buscar por artista, canción o género…")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_search_changed)
         search_row.addWidget(self.search_input)
         root.addLayout(search_row)
 
-        # Tabla Artista / Canción
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Artista", "Canción"])
+        # Tabla Artista / Canción / Género
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Artista", "Canción", "Género"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -126,6 +123,7 @@ function stopVid(){ if(player) player.stopVideo(); }
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(self._on_double_click)
         root.addWidget(self.table, stretch=1)
 
@@ -156,6 +154,11 @@ function stopVid(){ if(player) player.stopVideo(); }
         self.btn_open_file.clicked.connect(self._on_open_tracks_json)
         controls.addWidget(self.btn_open_file)
 
+        self.btn_reload = QToolButton()
+        self.btn_reload.setText("🔄 Recargar")
+        self.btn_reload.clicked.connect(self._scan_and_load)
+        controls.addWidget(self.btn_reload)
+
         controls.addStretch(1)
         root.addLayout(controls)
 
@@ -165,8 +168,8 @@ function stopVid(){ if(player) player.stopVideo(); }
         footer.setStyleSheet("font-size: 11px; opacity: 0.8;")
         root.addWidget(footer)
 
-        self.resize(900, 560)
-        self.setMinimumSize(720, 420)
+        self.resize(980, 560)
+        self.setMinimumSize(760, 420)
 
     # -------------------------
     # Cargar tracks desde JSON
@@ -174,22 +177,18 @@ function stopVid(){ if(player) player.stopVideo(); }
     def _scan_and_load(self):
         self.tracks.clear()
         p = tracks_json_path()
+
         if not p.exists():
-            # Plantilla para que el usuario entienda el formato
-            p.write_text(
-                json.dumps(
-                    [
-                        {
-                            "artista": "Daft Punk",
-                            "cancion": "One More Time",
-                            "url": "https://www.youtube.com/watch?v=FGBhQbmPwH8",
-                        }
-                    ],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
+            # Plantilla con género
+            template = [
+                {
+                    "artista": "Daft Punk",
+                    "cancion": "One More Time",
+                    "genero": "House",
+                    "url": "https://www.youtube.com/watch?v=FGBhQbmPwH8",
+                }
+            ]
+            p.write_text(json.dumps(template, ensure_ascii=False, indent=2), encoding="utf-8")
 
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -206,6 +205,7 @@ function stopVid(){ if(player) player.stopVideo(); }
                 {
                     "artista": (t.get("artista") or "(Desconocido)").strip(),
                     "cancion": (t.get("cancion") or "(Sin título)").strip(),
+                    "genero": (t.get("genero") or "(Sin género)").strip(),
                     "url": (t.get("url") or "").strip(),
                 }
             )
@@ -233,7 +233,11 @@ function stopVid(){ if(player) player.stopVideo(); }
         q = self.search_text.lower()
         indices = []
         for i, t in enumerate(self.tracks):
-            if q in t["artista"].lower() or q in t["cancion"].lower():
+            if (
+                q in t["artista"].lower()
+                or q in t["cancion"].lower()
+                or q in t["genero"].lower()
+            ):
                 indices.append(i)
         return indices
 
@@ -254,17 +258,23 @@ function stopVid(){ if(player) player.stopVideo(); }
         indices = self._filtered_indices()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(indices))
+
         for row, idx in enumerate(indices):
             t = self.tracks[idx]
+
             it_artist = QTableWidgetItem(t["artista"])
             it_song = QTableWidgetItem(t["cancion"])
-            # Guardamos el índice real en UserRole
+            it_genre = QTableWidgetItem(t["genero"])
+
             it_artist.setData(Qt.UserRole, idx)
             it_song.setData(Qt.UserRole, idx)
+            it_genre.setData(Qt.UserRole, idx)
+
             self.table.setItem(row, 0, it_artist)
             self.table.setItem(row, 1, it_song)
+            self.table.setItem(row, 2, it_genre)
+
         self.table.setSortingEnabled(True)
-        # Mantener selección si la pista actual está visible
         self._select_row_for_index(self.current_index)
 
     # -------------------------
@@ -293,7 +303,7 @@ function stopVid(){ if(player) player.stopVideo(); }
     # Reproducción
     # -------------------------
     def _on_double_click(self, row, _col):
-        item = self.table.item(row, 0) or self.table.item(row, 1)
+        item = self.table.item(row, 0) or self.table.item(row, 1) or self.table.item(row, 2)
         if not item:
             return
         idx = item.data(Qt.UserRole)
@@ -330,10 +340,12 @@ function stopVid(){ if(player) player.stopVideo(); }
     def _on_next(self):
         if not self.tracks:
             return
+
         if self.random_mode:
             if not self.random_queue:
                 pool = self._visible_pool_indices() or list(range(len(self.tracks)))
                 self._prepare_random_queue(pool=pool, exclude_index=self.current_index)
+
             nxt = self._get_next_random_index()
             if nxt is None:
                 pool = self._visible_pool_indices() or list(range(len(self.tracks)))
@@ -375,6 +387,7 @@ function stopVid(){ if(player) player.stopVideo(); }
     def _play_index(self, index: int):
         if not (0 <= index < len(self.tracks)):
             return
+
         self.current_index = index
         track = self.tracks[index]
 
@@ -383,7 +396,6 @@ function stopVid(){ if(player) player.stopVideo(); }
             self.statusBar().showMessage("URL inválida de YouTube para esta pista.", 5000)
             return
 
-        # Escapar comillas simples en el improbable caso de que entren en el ID (no debería)
         vid = vid.replace("'", "\\'")
         self.web.page().runJavaScript(f"playId('{vid}')")
 
@@ -396,7 +408,7 @@ function stopVid(){ if(player) player.stopVideo(); }
             return
         rows = self.table.rowCount()
         for r in range(rows):
-            item = self.table.item(r, 0) or self.table.item(r, 1)
+            item = self.table.item(r, 0) or self.table.item(r, 1) or self.table.item(r, 2)
             if not item:
                 continue
             if item.data(Qt.UserRole) == idx:
@@ -406,7 +418,9 @@ function stopVid(){ if(player) player.stopVideo(); }
     def _update_title(self):
         if 0 <= self.current_index < len(self.tracks):
             t = self.tracks[self.current_index]
-            self.setWindowTitle(f"{t['artista']} — {t['cancion']}  |  Reproductor — Gabriel Golker")
+            self.setWindowTitle(
+                f"{t['artista']} — {t['cancion']} ({t['genero']})  |  Reproductor — Gabriel Golker"
+            )
         else:
             self.setWindowTitle("Reproductor — Gabriel Golker")
 
@@ -414,14 +428,10 @@ function stopVid(){ if(player) player.stopVideo(); }
     # Utilidades
     # -------------------------
     def _on_open_tracks_json(self):
-        # Abre el archivo para editarlo rápido (se crea si no existe)
         p = tracks_json_path()
         if not p.exists():
             p.write_text("[]", encoding="utf-8")
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
-
-    # Para refrescar la lista si editas el JSON mientras la app está abierta:
-    # podrías añadir un botón "🔄 Recargar" y llamar self._scan_and_load()
 
 
 def main():
