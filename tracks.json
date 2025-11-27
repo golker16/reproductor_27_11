@@ -1,0 +1,20 @@
+[
+  {
+    "artista": "Daft Punk",
+    "cancion": "One More Time",
+    "genero": "House",
+    "url": "https://www.youtube.com/watch?v=FGBhQbmPwH8"
+  },
+  {
+    "artista": "Radiohead",
+    "cancion": "Creep",
+    "genero": "Alternative Rock",
+    "url": "https://youtu.be/XFkzRNyygfk"
+  },
+  {
+    "artista": "Bad Bunny",
+    "cancion": "Tití Me Preguntó",
+    "genero": "Reggaetón",
+    "url": "https://www.youtube.com/watch?v=Cr8K88UcO0s"
+  }
+]
